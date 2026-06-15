@@ -1,0 +1,6 @@
+[
+  {
+    "name": "python-hello-ecs-container",
+    "imageUri": "<YOUR_AWS_ACCOUNT_ID>.dkr.ecr.ap-southeast-1.amazonaws.com/python-hello-ecs:v2"
+  }
+]

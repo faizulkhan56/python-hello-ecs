@@ -4,3 +4,6 @@ __pycache__
 .gitignore
 *.pyc
 .env
+.env.*
+!.env.example
+pipeline/imagedefinitions.json

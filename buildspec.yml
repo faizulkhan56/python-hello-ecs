@@ -1,0 +1,46 @@
+version: 0.2
+
+# AWS CodeBuild spec for: Source (GitHub) -> Build (this file) -> Deploy (ECS)
+#
+# Required CodeBuild environment variables (set in the CodeBuild project or pipeline):
+#   AWS_ACCOUNT_ID   e.g. 123456789012
+#   AWS_DEFAULT_REGION (CodeBuild sets this automatically from project region)
+#   IMAGE_REPO_NAME    e.g. python-hello-ecs
+#   CONTAINER_NAME     must match the container name in your ECS task definition
+#   IMAGE_TAG          optional; defaults to short Git commit hash
+
+env:
+  variables:
+    IMAGE_REPO_NAME: python-hello-ecs
+    CONTAINER_NAME: python-hello-ecs-container
+  parameter-store:
+    # Optional: store AWS_ACCOUNT_ID in SSM Parameter Store instead of plain env var
+    # AWS_ACCOUNT_ID: /python-hello-ecs/aws-account-id
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR..."
+      - aws --version
+      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${IMAGE_TAG:-$COMMIT_HASH}
+      - echo "Repository URI = $REPOSITORY_URI"
+      - echo "Image tag = $IMAGE_TAG"
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+  build:
+    commands:
+      - echo "Build started on $(date)"
+      - docker build -t $REPOSITORY_URI:latest .
+      - docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG
+  post_build:
+    commands:
+      - echo "Build completed on $(date)"
+      - docker push $REPOSITORY_URI:latest
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$REPOSITORY_URI:$IMAGE_TAG" > imagedefinitions.json
+      - cat imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json

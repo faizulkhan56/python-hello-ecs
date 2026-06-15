@@ -1,0 +1,13 @@
+# Used only if your CodePipeline deploy stage uses CodeDeploy (blue/green) for ECS.
+# For the simpler "Amazon ECS" deploy action, CodeBuild output (imagedefinitions.json) is enough.
+
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: <TASK_DEFINITION_ARN>
+        LoadBalancerInfo:
+          ContainerName: python-hello-ecs-container
+          ContainerPort: 8000
+        PlatformVersion: LATEST

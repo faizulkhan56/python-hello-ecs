@@ -8,7 +8,7 @@ app = FastAPI()
 def home():
     return {
         "message": "Hello from Python app running on AWS ECS!",
-        "version": "v1",
+        "version": "v3",
         "time": datetime.utcnow().isoformat()
     }
 
