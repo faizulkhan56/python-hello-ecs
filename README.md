@@ -8,237 +8,342 @@ A minimal **FastAPI** application packaged as a Docker image, pushed to **Amazon
 
 ## Table of contents
 
-1. [What this project does](#what-this-project-does)
-2. [Two deployment paths (read this first)](#two-deployment-paths-read-this-first)
-3. [Configuration files explained](#configuration-files-explained)
-4. [Architecture (theory)](#architecture-theory)
-5. [Project structure](#project-structure)
-6. [Prerequisites](#prerequisites)
-7. [Local development and Docker test](#local-development-and-docker-test)
-8. [AWS setup — correct order (manual deploy)](#aws-setup--correct-order-manual-deploy)
-9. [AWS Console walkthroughs](#aws-console-walkthroughs)
-10. [Manual deploy workflow (code → ECR → ECS)](#manual-deploy-workflow-code--ecr--ecs)
-11. [Optional: CodePipeline + CodeBuild](#optional-codepipeline--codebuild)
-12. [Optional: CodeDeploy (blue/green)](#optional-codedeploy-bluegreen)
-13. [Troubleshooting](#troubleshooting)
-14. [Security notes](#security-notes)
+**Hands-on path (do in order)**
+
+1. [Complete end-to-end journey](#complete-end-to-end-journey-first--last)
+2. [Prerequisites](#prerequisites)
+3. [Phase 1 — Scaffold the Python project](#phase-1--scaffold-the-python-project)
+4. [Phase 2 — Containerize with Docker](#phase-2--containerize-with-docker)
+5. [Phase 3 — Push code to GitHub](#phase-3--push-code-to-github)
+6. [Phase 4 — AWS setup (manual deploy)](#phase-4--aws-setup-manual-deploy)
+7. [AWS Console walkthroughs (Phase 4 details)](#phase-4--aws-console-walkthroughs)
+8. [Phase 5 — Update app (code → ECR → ECS)](#phase-5--update-app-code--ecr--ecs)
+9. [Phase 6 — CodePipeline (optional)](#phase-6--codepipeline-optional)
+
+**Reference**
+
+10. [Reference (files, architecture, paths)](#reference)
+11. [Troubleshooting](#troubleshooting)
+12. [Security notes](#security-notes)
 
 ---
 
-## What this project does
+## Complete end-to-end journey (first → last)
 
-| Endpoint | Response |
-|----------|----------|
-| `GET /` | JSON greeting with version and UTC timestamp |
-| `GET /health` | `{"status": "ok"}` — for ECS / load-balancer health checks |
-
-The app listens on **port 8000** inside the container. Uvicorn serves the FastAPI app in `app.py`.
-
----
-
-## Two deployment paths (read this first)
-
-| | **Path A — Manual (recommended for learning)** | **Path B — CodePipeline (automation)** |
-|---|------------------------------------------------|----------------------------------------|
-| **When to use** | First deploy, updates by hand | Push to GitHub triggers build + deploy |
-| **Files you need** | `Dockerfile`, `app.py`, `ecs/task-definition.json` (reference) | Same + `buildspec.yml` |
-| **Files you do NOT need** | `buildspec.yml`, `imagedefinitions.json`, `appspec.yaml` | — |
-| **Build image** | Your laptop: `docker build` | CodeBuild runs `buildspec.yml` |
-| **Push to ECR** | Your laptop: `docker push` | CodeBuild pushes automatically |
-| **Update ECS** | Console: new task def revision + update service | Pipeline deploy stage uses `imagedefinitions.json` |
-
-**Important:** `buildspec.yml`, `pipeline/imagedefinitions.json.example`, and `codedeploy/appspec.yaml` are for **Path B / CodeDeploy only**. They are **not used** when you deploy manually from your machine.
-
-### Correct sequence for first-time AWS setup (Path A)
-
-Do these steps **in this order**. Skipping or reordering causes common errors.
+Follow these phases **in order**. Each phase builds on the previous one.
 
 ```text
-Step 1  IAM role          ecsTaskExecutionRole (pull ECR + write logs)
-Step 2  CloudWatch        Log group /ecs/python-hello-ecs
-Step 3  ECR               Repository python-hello-ecs
-Step 4  Local build       docker build + docker push :v1 to ECR
-Step 5  ECS cluster       e.g. python-hello-cluster (Fargate)
-Step 6  ECS task def      Family python-hello-ecs-task → image :v1
-Step 7  ECS service       Links cluster + task def, desired count 1
-Step 8  Test              Task public IP :8000 or ALB URL
+PHASE 1 — PYTHON PROJECT (your laptop)
+  1.1  Create project folder
+  1.2  Create virtual environment
+  1.3  Create requirements.txt
+  1.4  Create app.py (FastAPI)
+  1.5  Install dependencies + run locally with uvicorn
+  1.6  Test http://localhost:8000
+
+PHASE 2 — DOCKER (your laptop)
+  2.1  Create Dockerfile
+  2.2  Create .dockerignore
+  2.3  docker build
+  2.4  docker run + test http://localhost:8000
+
+PHASE 3 — GIT / GITHUB (your laptop)
+  3.1  Create .gitignore
+  3.2  git init → commit → push to GitHub
+
+PHASE 4 — AWS FIRST DEPLOY (AWS Console + CLI)
+  4.1  IAM role ecsTaskExecutionRole
+  4.2  CloudWatch log group /ecs/python-hello-ecs
+  4.3  ECR repository python-hello-ecs
+  4.4  docker push :v1 to ECR
+  4.5  ECS cluster (Fargate)
+  4.6  ECS task definition → image :v1
+  4.7  ECS service → desired count 1
+  4.8  Test http://<TASK_PUBLIC_IP>:8000
+
+PHASE 5 — APP UPDATES (repeat whenever code changes)
+  5.1  Edit app.py (e.g. version v2)
+  5.2  docker build + push :v2 to ECR
+  5.3  New task definition revision + update ECS service
+
+PHASE 6 — CODEPIPELINE (optional, after Phase 4 works)
+  6.1  GitHub connection
+  6.2  CodeBuild project (buildspec.yml)
+  6.3  CodePipeline Source → Build → Deploy
 ```
 
-Only after Step 7 works should you add CodePipeline (Path B).
-
----
-
-## Configuration files explained
-
-This section explains **what each file is**, **why it exists**, and **how they connect**.
-
-### Relationship diagram
-
-```text
-YOUR APP CODE                         AWS PIPELINE FILES (Path B only)
-─────────────                         ─────────────────────────────────
-
-app.py ──────┐
-requirements.txt ──┐
-                   ├──► Dockerfile ──► docker build ──► ECR image
-Dockerfile ────────┘         ▲                              │
-                             │                              │
-                    buildspec.yml ──── CodeBuild runs ───────┘
-                    (build + push)              │
-                                                ▼
-                                    imagedefinitions.json
-                                    (container name + image URI)
-                                                │
-                                                ▼
-ecs/task-definition.json ◄──── ECS task definition (blueprint)
-  - container name ─────────── must match imagedefinitions "name"
-  - image URI ──────────────── updated each deploy
-  - CPU, memory, ports, logs
-                                                │
-                                                ▼
-                                    ECS Service (runs tasks on cluster)
-
-codedeploy/appspec.yaml ──── ONLY for CodeDeploy blue/green
-  - points at ECS service + ALB
-  - NOT used by standard "Amazon ECS" pipeline deploy
-```
-
-### File reference
-
-| File | Used when | What it does | Relationship to project |
-|------|-----------|--------------|-------------------------|
-| **`Dockerfile`** | Always | Builds the runtime image: Python 3.12, installs `requirements.txt`, copies `app.py`, starts Uvicorn on port 8000 | Defines **how** your app becomes a container. Manual deploy and CodeBuild both run `docker build` using this file. |
-| **`ecs/task-definition.json`** | First ECS setup + CLI updates | JSON template for ECS **task definition**: Fargate CPU/memory, container name, ECR image URI, port 8000, CloudWatch logs, health check on `/health` | Tells ECS **what to run**. Container name `python-hello-ecs-container` must match `CONTAINER_NAME` in `buildspec.yml` and `imagedefinitions.json`. Replace `<YOUR_AWS_ACCOUNT_ID>` before registering. |
-| **`buildspec.yml`** | CodePipeline / CodeBuild only | Instructions for CodeBuild: ECR login → `docker build` → `docker push` → write `imagedefinitions.json` artifact | Automates what you do manually with `docker build` + `docker push`. Lives in repo root so CodeBuild finds it automatically. |
-| **`pipeline/imagedefinitions.json.example`** | Reference only | Example output format: `[{"name":"...","imageUri":"..."}]` | CodeBuild **generates** the real `imagedefinitions.json` at build time (see `buildspec.yml` post_build). The ECS **Deploy** stage reads that file to know which image to deploy. The `.example` file is documentation — do not commit generated `imagedefinitions.json`. |
-| **`codedeploy/appspec.yaml`** | CodeDeploy blue/green only | Tells CodeDeploy which ECS service and load balancer listener to shift traffic during blue/green deployment | **Not needed** for manual deploy or standard CodePipeline "Amazon ECS" deploy. Only use when deploy provider is **CodeDeploy to ECS** with an ALB. |
-| **`.env.example`** | Local reference | Placeholder values for AWS profile, account ID, cluster name, etc. | Copy to `.env` locally; never commit `.env`. |
-
-### How `imagedefinitions.json` connects build → deploy
-
-When CodePipeline runs:
-
-1. **Source** stage pulls this GitHub repo (including `Dockerfile`, `buildspec.yml`, `app.py`).
-2. **Build** stage (CodeBuild) executes `buildspec.yml`:
-   - Builds image from `Dockerfile`
-   - Pushes to ECR, e.g. `123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/python-hello-ecs:a1b2c3d`
-   - Creates artifact `imagedefinitions.json`:
-     ```json
-     [{"name":"python-hello-ecs-container","imageUri":"123456789012.dkr.ecr.ap-southeast-1.amazonaws.com/python-hello-ecs:a1b2c3d"}]
-     ```
-3. **Deploy** stage (Amazon ECS) reads `imagedefinitions.json`, registers a **new task definition revision** with that image, and **updates the ECS service**.
-
-The `name` field must exactly match the container name in your ECS task definition (`python-hello-ecs-container`).
-
-### Manual deploy vs pipeline — same end result
-
-| Action | Manual (you) | Pipeline (automated) |
-|--------|--------------|----------------------|
-| Build image | `docker build -t python-hello-ecs:v2 .` | `buildspec.yml` → `docker build` |
-| Push to ECR | `docker push ...:v2` | `buildspec.yml` → `docker push` |
-| Tell ECS new image | Edit task def image URI in console | `imagedefinitions.json` from CodeBuild |
-| Roll out | Update service + force deployment | ECS deploy stage |
-
----
-
-## Architecture (theory)
-
-```text
-Developer machine                AWS
-─────────────────               ─────────────────────────────────────────
-  app.py + Dockerfile
-        │
-        ▼
-  docker build  ──────────────►  Amazon ECR (private Docker registry)
-        │                              │
-        ▼                              ▼
-  docker run (local test)        Amazon ECS Cluster
-                                        │
-                                        ▼
-                                 ECS Service (keeps N tasks running)
-                                        │
-                                        ▼
-                                 ECS Task (containers from task definition)
-                                        │
-                                        ▼
-                                 ALB (optional) → users
-```
-
-| Term | Meaning |
-|------|---------|
-| **ECR** | Private Docker registry in AWS |
-| **ECS cluster** | Logical group where tasks run (Fargate = no EC2 to manage) |
-| **Task definition** | Blueprint: image, CPU, memory, ports, roles, logging |
-| **Task** | One running copy of a task definition |
-| **Service** | Keeps desired task count; replaces failed tasks; handles rolling deploys |
-
-**How task links to cluster:** You do not "attach" a task to a cluster directly. You create an **ECS service** on a **cluster** and point it at a **task definition**. The service starts tasks on that cluster.
-
----
-
-## Project structure
-
-```text
-python-hello-ecs/
-├── app.py                              # FastAPI app
-├── requirements.txt
-├── Dockerfile                          # Image build (always used)
-├── buildspec.yml                       # CodeBuild only (Path B)
-├── .env.example                        # Local placeholders
-├── ecs/
-│   └── task-definition.json            # ECS blueprint template
-├── codedeploy/
-│   └── appspec.yaml                    # CodeDeploy blue/green only
-└── pipeline/
-    └── imagedefinitions.json.example   # Format reference (not used at runtime)
-```
+> **Already cloned this repo?** You can start at [Phase 2](#phase-2--containerize-with-docker) (Docker) or [Phase 4](#phase-4--aws-setup-manual-deploy) (AWS) if Python scaffolding is done.
 
 ---
 
 ## Prerequisites
 
-**Local:** Docker Desktop, AWS CLI v2, Git (Python 3.12+ optional for local dev).
+Install these **before Phase 1**:
 
-**AWS (first time):** IAM role, CloudWatch log group, ECR repo, ECS cluster, task definition, service — see ordered steps below.
+| Tool | Purpose | Check |
+|------|---------|-------|
+| **Python 3.12+** | Local dev and virtual environment | `python --version` |
+| **pip** | Install Python packages | `pip --version` |
+| **Docker Desktop** | Build and test containers locally | `docker --version` |
+| **Git** | Version control and GitHub push | `git --version` |
+| **AWS CLI v2** | ECR login, ECS commands (Phase 4+) | `aws --version` |
+| **AWS account** | ECR, ECS, IAM (Phase 4+) | Console login works |
 
-Copy `.env.example` → `.env` locally. **Never commit `.env`.**
+Copy `.env.example` → `.env` locally before Phase 4. **Never commit `.env`.**
 
 ---
 
-## Local development and Docker test
+## Phase 1 — Scaffold the Python project
 
-### Run without Docker
+This phase creates the Python app **from scratch**. If you cloned this repo, the files already exist — skim to understand what each file does, then run the test commands.
+
+### 1.1 Create project folder
+
+```bash
+mkdir python-hello-ecs
+cd python-hello-ecs
+```
+
+### 1.2 Create virtual environment
+
+A virtual environment keeps project dependencies isolated from your system Python.
 
 ```bash
 python -m venv .venv
-source .venv/Scripts/activate    # Git Bash
-pip install -r requirements.txt
-uvicorn app:app --host 0.0.0.0 --port 8000 --reload
-curl http://localhost:8000
 ```
 
-### Run with Docker (do this before AWS)
+**Activate it:**
+
+```bash
+# Git Bash / Linux / macOS
+source .venv/Scripts/activate
+
+# PowerShell
+.venv\Scripts\Activate.ps1
+
+# CMD
+.venv\Scripts\activate.bat
+```
+
+Your prompt should show `(.venv)`. While active, `pip install` affects only this project.
+
+### 1.3 Create `requirements.txt`
+
+```text
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+```
+
+| Package | Role |
+|---------|------|
+| **fastapi** | Web framework — defines routes like `/` and `/health` |
+| **uvicorn** | ASGI server — runs the FastAPI app (like Gunicorn for Flask) |
+
+### 1.4 Create `app.py`
+
+```python
+from fastapi import FastAPI
+from datetime import datetime
+
+app = FastAPI()
+
+
+@app.get("/")
+def home():
+    return {
+        "message": "Hello from Python app running on AWS ECS!",
+        "version": "v1",
+        "time": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+```
+
+| Route | Purpose |
+|-------|---------|
+| `GET /` | Main response — proves the app is running |
+| `GET /health` | Health check — used by ECS and load balancers |
+
+### 1.5 Install dependencies and run locally
+
+```bash
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+| Flag | Meaning |
+|------|---------|
+| `app:app` | Module `app.py`, variable `app = FastAPI()` |
+| `--host 0.0.0.0` | Listen on all interfaces (required inside Docker/ECS later) |
+| `--port 8000` | Port the app listens on |
+| `--reload` | Auto-restart on code change (local dev only; not used in Docker CMD) |
+
+### 1.6 Test locally
+
+Open another terminal (keep uvicorn running):
+
+```bash
+curl http://localhost:8000
+curl http://localhost:8000/health
+```
+
+Or open **http://localhost:8000** in a browser. You should see JSON with `"message"`, `"version"`, and `"time"`.
+
+Stop uvicorn with `Ctrl+C` when done.
+
+**Phase 1 complete when:** both endpoints return JSON locally.
+
+---
+
+## Phase 2 — Containerize with Docker
+
+Docker packages your Python app so it runs the same on your laptop, in ECR, and on ECS.
+
+### 2.1 Create `Dockerfile`
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+| Line | Why |
+|------|-----|
+| `FROM python:3.12-slim` | Base image with Python 3.12 (small Linux image) |
+| `WORKDIR /app` | Working directory inside the container |
+| `COPY` + `RUN pip install` | Install deps before copying app code (better layer caching) |
+| `EXPOSE 8000` | Documents the port (ECS task definition must match) |
+| `CMD uvicorn ...` | Starts the app when the container runs (no `--reload` in production) |
+
+### 2.2 Create `.dockerignore`
+
+```text
+.venv
+__pycache__
+.git
+.gitignore
+*.pyc
+.env
+.env.*
+!.env.example
+pipeline/imagedefinitions.json
+```
+
+Keeps virtual env, git metadata, and secrets out of the image (smaller, safer builds).
+
+### 2.3 Build the image
 
 ```bash
 docker build -t python-hello-ecs:local .
+```
+
+### 2.4 Run and test the container
+
+**Foreground (recommended for first test):**
+
+```bash
 docker run --rm -p 8000:8000 --name python-hello-container python-hello-ecs:local
 ```
 
-Background mode: `docker run -d -p 8000:8000 --name python-hello-container python-hello-ecs:local`
+**Background:**
+
+```bash
+docker run -d -p 8000:8000 --name python-hello-container python-hello-ecs:local
+```
 
 Use **`-d` only** — avoid **`-dit`** (can leave container in `Created` state without running).
 
-Verify: `curl http://localhost:8000` and `curl http://localhost:8000/health`
+Test:
+
+```bash
+curl http://localhost:8000
+curl http://localhost:8000/health
+docker logs python-hello-container
+```
+
+Clean up background container:
+
+```bash
+docker stop python-hello-container
+docker rm python-hello-container
+```
+
+**Phase 2 complete when:** container responds on `http://localhost:8000` the same as Phase 1.
 
 ---
 
-## AWS setup — correct order (manual deploy)
+## Phase 3 — Push code to GitHub
 
-Complete [Local Docker test](#run-with-docker-do-this-before-aws) first, then follow Steps 1–8 in order.
+Version control before AWS. CodePipeline (Phase 6) also needs a GitHub repo.
+
+### 3.1 Create `.gitignore`
+
+Ensure at minimum:
+
+```text
+.venv/
+__pycache__/
+.env
+.env.*
+!.env.example
+.aws/
+```
+
+(Full list is in this repo's `.gitignore`.)
+
+### 3.2 Copy env template (before Phase 4)
+
+```bash
+cp .env.example .env
+# Edit .env with your AWS profile and account ID — never commit .env
+```
+
+### 3.3 Initialize Git and push
+
+```bash
+git init
+git add app.py requirements.txt Dockerfile .dockerignore .gitignore
+git add README.md ecs/ buildspec.yml codedeploy/ pipeline/ .env.example
+git commit -m "Initial Python FastAPI app with Docker and ECS config"
+git branch -M main
+git remote add origin https://github.com/<YOUR_GITHUB_USER>/python-hello-ecs.git
+git push -u origin main
+```
+
+**Phase 3 complete when:** code is visible on GitHub. Do **not** commit `.env` or `.venv/`.
 
 ---
 
-## AWS Console walkthroughs
+## Phase 4 — AWS setup (manual deploy)
+
+Complete [Phase 2](#phase-2--containerize-with-docker) first. Do these AWS steps **in this order**:
+
+```text
+Step 1  IAM role          ecsTaskExecutionRole
+Step 2  CloudWatch        Log group /ecs/python-hello-ecs
+Step 3  ECR               Repository python-hello-ecs
+Step 4  Push image        docker build + docker push :v1
+Step 5  ECS cluster       python-hello-cluster (Fargate)
+Step 6  ECS task def      python-hello-ecs-task → image :v1
+Step 7  ECS service       python-hello-service, desired count 1
+Step 8  Test              http://<TASK_PUBLIC_IP>:8000
+```
+
+Only after Step 8 works should you add [CodePipeline (Phase 6)](#phase-6--codepipeline-optional).
+
+### Phase 4 — AWS Console walkthroughs
 
 ### Step 1 — IAM role: `ecsTaskExecutionRole`
 
@@ -412,9 +517,9 @@ If you add ALB later:
 
 ---
 
-## Manual deploy workflow (code → ECR → ECS)
+## Phase 5 — Update app (code → ECR → ECS)
 
-Use this for every code change when **not** using CodePipeline.
+Repeat this phase whenever you change code and **are not** using CodePipeline (Phase 6).
 
 | Step | Action |
 |------|--------|
@@ -442,9 +547,9 @@ aws ecs update-service \
 
 ---
 
-## Optional: CodePipeline + CodeBuild
+## Phase 6 — CodePipeline (optional)
 
-Set this up **only after** manual Path A works (ECR + ECS service exist).
+Set this up **only after [Phase 4](#phase-4--aws-setup-manual-deploy) works** (ECR + ECS service running).
 
 ### What you create in AWS
 
@@ -508,7 +613,7 @@ Watch pipeline: Source → Build (CodeBuild logs) → Deploy (ECS service update
 
 ---
 
-## Optional: CodeDeploy (blue/green)
+## CodeDeploy blue/green (optional)
 
 **When:** Production setups with ALB, zero-downtime traffic shifting.
 
@@ -523,6 +628,95 @@ Watch pipeline: Source → Build (CodeBuild logs) → Deploy (ECS service update
 **`appspec.yaml` role:** Tells CodeDeploy which ECS **service** to update and which **container:port** receives load balancer traffic during a blue/green deployment. CodeDeploy creates a new task set (green), shifts ALB traffic, then drains the old set (blue).
 
 For this learning project, **skip CodeDeploy** unless you already have an ALB and want blue/green practice.
+
+---
+
+## Reference
+
+### What this project does
+
+| Endpoint | Response |
+|----------|----------|
+| `GET /` | JSON greeting with version and UTC timestamp |
+| `GET /health` | `{"status": "ok"}` — for ECS / load-balancer health checks |
+
+The app listens on **port 8000** inside the container. Uvicorn serves the FastAPI app in `app.py`.
+
+### Two deployment paths
+
+| | **Path A — Manual (Phases 1–5)** | **Path B — CodePipeline (Phase 6)** |
+|---|----------------------------------|-------------------------------------|
+| **When to use** | First deploy and learning | Push to GitHub triggers build + deploy |
+| **Files you need** | `app.py`, `Dockerfile`, `ecs/task-definition.json` | Same + `buildspec.yml` |
+| **Files you do NOT need** | `buildspec.yml`, `imagedefinitions.json`, `appspec.yaml` | — |
+| **Build image** | Phase 2 / 5: `docker build` on your laptop | CodeBuild runs `buildspec.yml` |
+| **Push to ECR** | Phase 4 / 5: `docker push` | CodeBuild pushes automatically |
+| **Update ECS** | Phase 4 / 5: task def revision + update service | Pipeline deploy uses `imagedefinitions.json` |
+
+**Important:** `buildspec.yml`, `pipeline/imagedefinitions.json.example`, and `codedeploy/appspec.yaml` are for **Path B / CodeDeploy only**. They are **not used** in Phases 1–5 (manual path).
+
+### Configuration files explained
+
+| File | Used when | What it does |
+|------|-----------|--------------|
+| **`Dockerfile`** | Phases 2, 4, 5, 6 | Builds the container image from `app.py` + dependencies |
+| **`ecs/task-definition.json`** | Phase 4, 5 | ECS blueprint: CPU, ports, logs, container name + image URI |
+| **`buildspec.yml`** | Phase 6 only | CodeBuild: build, push to ECR, generate `imagedefinitions.json` |
+| **`pipeline/imagedefinitions.json.example`** | Reference | Shows format CodeBuild outputs for ECS deploy stage |
+| **`codedeploy/appspec.yaml`** | CodeDeploy only | Blue/green traffic shifting with ALB |
+| **`.env.example`** | Phase 4+ locally | Placeholder AWS values — copy to `.env`, never commit |
+
+Container name **`python-hello-ecs-container`** must match in `task-definition.json`, `buildspec.yml`, and `imagedefinitions.json`.
+
+### Architecture (theory)
+
+```text
+Developer machine                AWS
+─────────────────               ─────────────────────────────────────────
+  app.py + Dockerfile
+        │
+        ▼
+  docker build  ──────────────►  Amazon ECR (private Docker registry)
+        │                              │
+        ▼                              ▼
+  docker run (local test)        Amazon ECS Cluster
+                                        │
+                                        ▼
+                                 ECS Service (keeps N tasks running)
+                                        │
+                                        ▼
+                                 ECS Task (containers from task definition)
+                                        │
+                                        ▼
+                                 ALB (optional) → users
+```
+
+| Term | Meaning |
+|------|---------|
+| **ECR** | Private Docker registry in AWS |
+| **ECS cluster** | Logical group where tasks run (Fargate = no EC2 to manage) |
+| **Task definition** | Blueprint: image, CPU, memory, ports, roles, logging |
+| **Task** | One running copy of a task definition |
+| **Service** | Keeps desired task count; replaces failed tasks; handles rolling deploys |
+
+### Project structure
+
+```text
+python-hello-ecs/
+├── app.py                              # Phase 1 — FastAPI app
+├── requirements.txt                    # Phase 1 — Python dependencies
+├── Dockerfile                          # Phase 2 — image build
+├── .dockerignore                       # Phase 2 — exclude .venv from image
+├── .gitignore                          # Phase 3 — exclude secrets from Git
+├── buildspec.yml                       # Phase 6 — CodeBuild only
+├── .env.example                        # Phase 4 — local AWS placeholders
+├── ecs/
+│   └── task-definition.json            # Phase 4 — ECS blueprint
+├── codedeploy/
+│   └── appspec.yaml                    # CodeDeploy blue/green only
+└── pipeline/
+    └── imagedefinitions.json.example   # Phase 6 — format reference
+```
 
 ---
 
